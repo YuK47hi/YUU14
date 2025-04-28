@@ -1,0 +1,430 @@
+import tkinter as tk
+from tkinter import ttk
+import requests
+import json
+import sounddevice as sd
+import numpy as np
+import speech_recognition as sr
+import time
+import sys
+import threading
+from PIL import Image, ImageTk # Pillowライブラリが必要
+
+# --- VOICEVOX関連の設定 ---
+host = "127.0.0.1"
+port = "50021"
+speaker = 8 # 話者を指定 (例: 8 つむぎ)
+
+def post_audio_query(text: str) -> dict | None:
+    """音声合成用のクエリを作成する"""
+    params = {"text": text, "speaker": speaker}
+    try:
+        res = requests.post(
+            f"http://{host}:{port}/audio_query",
+            params=params,
+            timeout=10 # タイムアウト設定
+        )
+        res.raise_for_status() # エラーがあれば例外を発生
+        return res.json()
+    except requests.exceptions.RequestException as e:
+        print(f"\nAudio Queryエラー: {e}")
+        return None
+
+def post_synthesis(query_data: dict) -> bytes | None:
+    """音声合成を実行する"""
+    params = {"speaker": speaker}
+    headers = {"content-type": "application/json"}
+    try:
+        res = requests.post(
+            f"http://{host}:{port}/synthesis",
+            data=json.dumps(query_data),
+            params=params,
+            headers=headers,
+            timeout=20 # タイムアウト設定 (合成は時間がかかる場合がある)
+        )
+        res.raise_for_status()
+        return res.content
+    except requests.exceptions.RequestException as e:
+        print(f"\nSynthesisエラー: {e}")
+        return None
+
+def play_wavfile(wav_data: bytes | None):
+    """音声を再生する"""
+    if wav_data is None:
+        return
+    try:
+        sample_rate = 24000  # VOICEVOXのデフォルトサンプリングレート
+        wav_array = np.frombuffer(wav_data, dtype=np.int16)
+        sd.play(wav_array, sample_rate)
+        sd.wait() # 再生が終わるまで待つ
+    except Exception as e:
+        print(f"\n音声再生エラー: {e}")
+        print("利用可能なオーディオデバイスを確認してください。")
+
+
+# --- 音声認識関連の関数 ---
+def recognize_speech_from_mic(recognizer: sr.Recognizer, microphone: sr.Microphone) -> dict:
+    """マイクから音声を取得し、テキストに変換する"""
+    if not isinstance(recognizer, sr.Recognizer):
+        raise TypeError("`recognizer` must be `Recognizer` instance")
+    if not isinstance(microphone, sr.Microphone):
+        raise TypeError("`microphone` must be `Microphone` instance")
+
+    response = {
+        "success": True,
+        "error": None,
+        "transcription": None
+    }
+
+    with microphone as source:
+        print("\nどうぞ話してください（5秒間）...")
+        try:
+            audio = recognizer.listen(source, timeout=5, phrase_time_limit=5)
+        except sr.WaitTimeoutError:
+            response["success"] = False
+            response["error"] = "タイムアウトしました。音声が検出されませんでした。"
+            return response
+        except Exception as e:
+            response["success"] = False
+            response["error"] = f"マイクからの音声取得中にエラー: {e}"
+            return response
+
+    try:
+        response["transcription"] = recognizer.recognize_google(audio, language='ja-JP')
+    except sr.RequestError as e:
+        response["success"] = False
+        response["error"] = f"Google APIに接続できませんでした; {e}"
+    except sr.UnknownValueError:
+        response["error"] = "音声を認識できませんでした"
+    except Exception as e:
+        response["success"] = False
+        response["error"] = f"音声認識中に予期せぬエラー: {e}"
+
+    return response
+
+# --- 応答生成関数 (シンプルな応答ロジック) ---
+def generate_response(user_text: str | None) -> str:
+    """ユーザーの発言に対する応答を生成する"""
+    if user_text:
+        if "こんにちは" in user_text:
+            return "こんにちは！何かお手伝いしましょうか？"
+        elif "ありがとう" in user_text or "どうも" in user_text:
+            return "どういたしまして！"
+        elif "天気" in user_text:
+            return "今日の天気はどうでしょうか？外を見てみてくださいね！"
+        elif "名前" in user_text:
+            return "私はVOICEVOXと連携するAIアシスタントです。"
+        elif "何ができる" in user_text:
+            return "簡単な日常会話や、特定の質問に答えることができますよ。"
+        elif "大きく" in user_text:
+            return "ウィンドウを大きくしますね。"
+        elif "小さく" in user_text:
+            return "ウィンドウを小さくしますね。"
+        else:
+            return f"「{user_text}」ですね、承知しました。"
+    else:
+        return "すみません、うまく聞き取れませんでした。もう一度お願いします。"
+
+def speak(self, text: str): # self を追加
+    """テキストをVOICEVOXで音声化して再生するヘルパー関数"""
+    print("AI [発話中]...")
+    self.show_speaking_vroid_image() # 発話中画像を表示
+
+    if "大きく" in text:
+        self.master.geometry("700x600")
+    elif "小さく" in text:
+        self.master.geometry("500x400")
+
+    query = post_audio_query(text)
+    if query:
+        wav = post_synthesis(query)
+        if wav:
+            play_wavfile(wav)
+            if "大きく" in text or "小さく" in text:
+                self.master.after(2000, lambda: self.master.geometry("600x500")) # 2秒後に元のサイズに戻す
+            self.hide_speaking_vroid_image() # 発話終了時に元の画像に戻す
+            if hasattr(self, 'buttons_hidden') and self.buttons_hidden:
+                self.show_buttons()
+                self.buttons_hidden = False
+        else:
+            print(">> 音声合成に失敗しました。", file=sys.stderr)
+            self.hide_speaking_vroid_image() # エラー時も元の画像に戻す
+            if hasattr(self, 'buttons_hidden') and self.buttons_hidden:
+                self.show_buttons()
+                self.buttons_hidden = False
+    else:
+        print(">> Audio Queryの作成に失敗しました。", file=sys.stderr)
+        self.hide_speaking_vroid_image() # エラー時も元の画像に戻す
+        if hasattr(self, 'buttons_hidden') and self.buttons_hidden:
+            self.show_buttons()
+            self.buttons_hidden = False
+
+class VoiceChatApp:
+    def __init__(self, master):
+        self.master = master # ルートウィンドウへの参照を保存
+        master.title("音声チャット")
+        master.geometry("800x1000") # 初期サイズを設定
+
+        background_width = 950 #幅
+        background_height = 600 #高さ
+        try:
+            self.bg_image = Image.open("image_fx.jpg") # 背景画像のパスを指定
+            resized_image = self.bg_image.resize((background_width, background_height), Image.Resampling.LANCZOS)
+            self.bg_photo = ImageTk.PhotoImage(resized_image)
+            self.bg_label = tk.Label(master, image=self.bg_photo)
+            self.bg_label.place(x=0, y=0) # relwidthとrelheightを削除
+            self.bg_label.lower() # 他のウィジェットを前面に表示
+        except FileNotFoundError:
+            print("背景画像ファイルが見つかりません。")
+
+        self.vroid_image_original = None # オリジナルのVRoidキャラクター画像を保持
+        self.vroid_photo = None
+        self.vroid_label = tk.Label(master)
+        self.vroid_label.pack(pady=10)
+
+        try:
+            self.vroid_image_original = Image.open("vroid_character.png") # VRoidキャラクターの画像パスを指定
+            self.resize_vroid_image() # 初期表示
+        except FileNotFoundError:
+            print("VRoidキャラクターの画像ファイルが見つかりません。")
+
+        # 音声合成中に表示するVRoid画像用
+        self.speaking_vroid_image_path = "Vto.png" # 発話中に表示したいVRoid画像のパス
+        self.speaking_vroid_image_original = None # オリジナルの発話中画像を保持
+        try:
+            self.speaking_vroid_image_original = Image.open(self.speaking_vroid_image_path)
+            self.speaking_vroid_photo = ImageTk.PhotoImage(self.speaking_vroid_image_original) # 初期表示用
+        except FileNotFoundError:
+            print(f"発話中のVRoid画像ファイル '{self.speaking_vroid_image_path}' が見つかりません。")
+            self.speaking_vroid_image_original = None
+            self.speaking_vroid_photo = None
+
+        self.chat_log = tk.Text(master, height=10, width=50, state=tk.DISABLED)
+        self.chat_log.pack(pady=10)
+
+        self.input_frame = ttk.Frame(master, width=400) # 幅を400に設定
+        self.input_frame.pack(fill=tk.X, padx=5, pady=5, expand=False) # expand=False を追加
+
+        self.input_entry = ttk.Entry(self.input_frame)
+        self.input_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.input_entry.bind("<Return>", self.send_message)
+
+        self.send_button = ttk.Button(self.input_frame, text="送信", command=self.send_message)
+        self.send_button.pack(side=tk.RIGHT, padx=5)
+
+        self.button_frame = ttk.Frame(master)
+        self.button_frame.pack(pady=5)
+
+        self.start_button = ttk.Button(self.button_frame, text="会話を開始", command=self.start_conversation)
+        self.start_button.pack(side=tk.LEFT, padx=5)
+        self.stop_button = ttk.Button(self.button_frame, text="終了", command=self.close_window) # コマンドを変更
+        self.stop_button.pack(side=tk.LEFT, padx=5)
+        self.stop_button.config(state=tk.DISABLED)
+        self.force_stop_button = ttk.Button(self.button_frame, text="強制終了", command=self.force_stop_conversation)
+        self.force_stop_button.pack(side=tk.LEFT, padx=5)
+        self.force_stop_button.config(state=tk.DISABLED)
+
+        # ボタンへの参照を保存
+        self.start_button_ref = self.start_button
+        self.stop_button_ref = self.stop_button
+        self.force_stop_button_ref = self.force_stop_button
+
+        self.recognizer = sr.Recognizer()
+        self.microphone = sr.Microphone()
+
+        try:
+            with self.microphone as source:
+                self.recognizer.adjust_for_ambient_noise(source, duration=0.2)
+            print("マイクの準備ができました。")
+        except Exception as e:
+            print(f"マイクの初期化または準備に失敗しました: {e}", file=sys.stderr)
+            print("マイクが接続され、OSでアクセス許可されているか確認してください。", file=sys.stderr)
+            self.microphone = None
+
+        self.is_talking = False
+        self.conversation_thread = None
+        self.buttons_hidden = False # ボタンの表示状態を管理するフラグを追加
+
+        master.bind("<Configure>", self.on_resize)
+
+    def resize_vroid_image(self, width=None, height=None):
+        if self.vroid_image_original:
+            if width is None or height is None:
+                width = self.master.winfo_width()
+                height = int(self.master.winfo_height() * 0.4) # 例: ウィンドウ高さの40%
+
+            try:
+                resized_image = self.vroid_image_original.resize((width, height), Image.Resampling.LANCZOS) # デフォルト
+                self.vroid_photo = ImageTk.PhotoImage(resized_image)
+                self.vroid_label.config(image=self.vroid_photo)
+            except Exception as e:
+                print(f"VRoid画像のリサイズ中にエラー: {e}")
+
+    def resize_speaking_vroid_image(self, width, height):
+        """発話中のVRoid画像をリサイズする"""
+        if self.speaking_vroid_image_original:
+            try:
+                resized_image = self.speaking_vroid_image_original.resize((width, height), Image.Resampling.LANCZOS)
+                self.speaking_vroid_photo = ImageTk.PhotoImage(resized_image)
+                self.vroid_label.config(image=self.speaking_vroid_photo)
+            except Exception as e:
+                print(f"発話中のVRoid画像のリサイズ中にエラー: {e}")
+
+    def on_resize(self, event):
+        self.resize_vroid_image(event.width, int(event.height * 0.4)) # リサイズ時に高さを調整
+
+    def send_message(self, event=None):
+        message = self.input_entry.get()
+        if message:
+            self.update_chat_log(f"あなた: {message}")
+            self.input_entry.delete(0, tk.END)
+            response_text = generate_response(message)
+            self.update_chat_log(f"AI: {response_text}", "blue")
+            speak(self, response_text) # self を渡す
+
+    def start_conversation(self):
+        if self.microphone is None:
+            self.update_chat_log("エラー: マイクが使用できません。", "red")
+            return
+
+        if not self.is_talking:
+            self.is_talking = True
+            self.start_button.config(state=tk.DISABLED)
+            self.stop_button.config(state=tk.NORMAL)
+            self.force_stop_button.config(state=tk.NORMAL)
+            self.update_chat_log("会話を開始します。話しかけてください。", "green")
+            self.conversation_thread = threading.Thread(target=self.conversation_loop_gui)
+            self.conversation_thread.start()
+
+    def conversation_loop_gui(self):
+        self.update_chat_log("-" * 20)
+        speech_response = recognize_speech_from_mic(self.recognizer, self.microphone)
+
+        user_input = None
+        if speech_response["success"]:
+            user_input = speech_response["transcription"]
+            if user_input:
+                self.update_chat_log(f"あなた (音声): 「{user_input}」")
+            elif speech_response["error"]:
+                self.update_chat_log(f"音声認識: {speech_response['error']}", "red")
+                response_text = generate_response(None)
+                self.update_chat_log(f"AI: {response_text}", "blue")
+                speak(self, response_text) # self を渡す
+        elif not speech_response["success"]:
+            self.update_chat_log(f"音声認識エラー: {speech_response['error']}", "red")
+            speak(self, "すみません、音声の認識で問題がありました。") # self を渡す
+
+        if user_input and ("さようなら" in user_input or "バイバイ" in user_input):
+            response_text = "はい、さようなら。またお話ししましょう。"
+            self.update_chat_log(f"AI: {response_text}", "blue")
+            speak(self, response_text) # self を渡す
+            self.stop_conversation()
+            return
+
+        if user_input:
+            response_text = generate_response(user_input)
+            self.update_chat_log(f"AI: {response_text}", "blue")
+            speak(self, response_text) # self を渡す
+
+        # 会話を続けるために再度音声認識を開始 (ただし、is_talkingがTrueの場合のみ)
+        if self.is_talking:
+            self.master.after(100, self.conversation_loop_gui) # 0.1秒後に再度実行
+
+    def stop_conversation(self):
+        if self.is_talking:
+            self.is_talking = False
+            self.start_button.config(state=tk.NORMAL)
+            self.stop_button.config(state=tk.DISABLED)
+            self.force_stop_button.config(state=tk.DISABLED)
+            self.update_chat_log("会話を終了します。", "red")
+
+    def force_stop_conversation(self):
+        if self.is_talking:
+            self.is_talking = False
+            self.start_button.config(state=tk.NORMAL)
+            self.stop_button.config(state=tk.DISABLED)
+            self.force_stop_button.config(state=tk.DISABLED)
+            self.update_chat_log("会話を強制終了します。", "purple") # 強制終了を目立たせる
+        # 必要であれば、スレッドの終了処理を追加 (ただし、threading.Thread.join()はGUIがフリーズする可能性があるため注意
+        # 今回のシンプルなループでは、is_talkingフラグでループを抜けるため、明示的なスレッド終了処理は
+        # 不要かもしれません。
+
+    def update_chat_log(self, message, color="black"):
+        self.chat_log.config(state=tk.NORMAL)
+        self.chat_log.insert(tk.END, message + "\n", color)
+        self.chat_log.config(state=tk.DISABLED)
+        self.chat_log.see(tk.END) # 最新のメッセージを表示
+        self.chat_log.tag_config("red", foreground="red")
+        self.chat_log.tag_config("blue", foreground="blue")
+        self.chat_log.tag_config("green", foreground="green")
+        self.chat_log.tag_config("purple", foreground="purple") # 強制終了用の色
+
+    def close_window(self):
+        """ウィンドウを閉じる"""
+        self.master.destroy()
+
+    def show_speaking_vroid_image(self):
+        """音声合成中にVRoid画像を切り替える"""
+        if self.speaking_vroid_photo:
+            self.original_vroid_photo = self.vroid_photo # 元の画像を記憶
+            # 発話中の画像のサイズを変更して表示
+            self.resize_speaking_vroid_image(400, 400) # 例: 幅200, 高さ300にリサイズ
+            self.hide_buttons() # ボタンを非表示にする
+            self.buttons_hidden = True
+
+    def hide_speaking_vroid_image(self):
+        """音声合成終了後にVRoid画像を元に戻す"""
+        if hasattr(self, 'original_vroid_photo') and self.original_vroid_photo:
+            self.vroid_label.config(image=self.original_vroid_photo)
+            self.original_vroid_photo = None
+            self.resize_vroid_image() # 元のサイズに戻す (必要に応じて)
+            self.show_buttons() # ボタンを再表示する
+            self.buttons_hidden = False
+
+    def hide_buttons(self):
+        """会話制御ボタンを非表示にする"""
+        self.start_button_ref.pack_forget()
+        self.stop_button_ref.pack_forget()
+        self.force_stop_button_ref.pack_forget()
+
+    def show_buttons(self):
+        """会話制御ボタンを再表示する"""
+        self.start_button_ref.pack(side=tk.LEFT, padx=5)
+        self.stop_button_ref.pack(side=tk.LEFT, padx=5)
+        self.force_stop_button_ref.pack(side=tk.LEFT, padx=5)
+
+def check_voicevox_engine():
+    host = "127.0.0.1"
+    port = "50021"
+    try:
+        response = requests.get(f"http://{host}:{port}/version", timeout=2)
+        if response.status_code == 200:
+            print("VOICEVOXエンジン接続確認 OK")
+            return True
+        else:
+            print(f"VOICEVOXエンジンに接続できませんでした。ステータス: {response.status_code}", file=sys.stderr)
+            print(f"URL: http://{host}:{port}", file=sys.stderr)
+            return False
+    except requests.exceptions.RequestException as e:
+        print(f"VOICEVOXエンジンへの接続中にエラー: {e}", file=sys.stderr)
+        print("VOICEVOXアプリが起動しているか、ホスト/ポート設定が正しいか確認してください。", file=sys.stderr)
+        return False
+    except Exception as e:
+        print(f"エンジン接続確認中に予期せぬエラー: {e}", file=sys.stderr)
+        return False
+
+if __name__ == "__main__":
+    if check_voicevox_engine():
+        root = tk.Tk()
+        root.resizable(width=False, height=False) #ウインドウのサイズ変更を固定
+        app = VoiceChatApp(root)
+        try:
+            root.mainloop()
+        except KeyboardInterrupt:
+            print("\nCtrl+C を検知しました。プログラムを終了します...")
+        finally:
+            print("プログラムを終了します。")
+            sys.exit(0)
+    else:
+        print("VOICEVOXエンジンが利用できないため、アプリケーションを開始できません。", file=sys.stderr)
+        sys.exit(1)
